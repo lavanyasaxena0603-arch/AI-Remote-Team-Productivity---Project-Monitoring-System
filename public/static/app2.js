@@ -4,7 +4,9 @@
    ================================================================ */
 'use strict';
 
-const API = 'http://localhost:5000/api';
+// Route through Hono proxy so browser never calls localhost:5000 directly.
+// Hono forwards /flask/api/* → Flask :5000/api/* server-side (no CORS/mixed-content).
+const API = '/flask/api';
 let currentUser   = null;
 let currentProject = null;
 let allProjects   = [];
@@ -39,16 +41,34 @@ async function apiCall(endpoint, method = 'GET', body = null) {
   try {
     const opts = {
       method,
+      // 'include' works for same-origin proxy; no CORS issue
       credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
     };
     if (body) opts.body = JSON.stringify(body);
-    const res  = await fetch(API + endpoint, opts);
-    const data = await res.json();
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 12000); // 12 s timeout
+    opts.signal = controller.signal;
+
+    const res = await fetch(API + endpoint, opts);
+    clearTimeout(timer);
+
+    // Always try to parse JSON; fall back gracefully
+    let data;
+    try {
+      data = await res.json();
+    } catch (_) {
+      data = { success: false, error: `Server returned non-JSON (HTTP ${res.status})` };
+    }
     return data;
   } catch (e) {
-    console.error('API error:', e);
-    return { success: false, error: 'Network error — Flask server offline' };
+    // AbortError → timeout; TypeError → network down
+    const offline = e.name === 'AbortError'
+      ? 'Request timed out — Flask may be starting up, please retry'
+      : 'Backend unreachable — check Flask is running on port 5000';
+    console.warn('apiCall error:', endpoint, e.message);
+    return { success: false, error: offline };
   }
 }
 
@@ -56,11 +76,17 @@ async function apiCall(endpoint, method = 'GET', body = null) {
 // AUTH INIT — Show login if not authenticated
 // ============================================================
 async function initAuth() {
-  const res = await apiCall('/me');
-  if (res.success && res.user) {
-    currentUser = res.user;
-    onAuthSuccess();
-  } else {
+  try {
+    const res = await apiCall('/me');
+    if (res.success && res.user) {
+      currentUser = res.user;
+      onAuthSuccess();
+    } else {
+      showAuthOverlay();
+    }
+  } catch (e) {
+    // Never leave the user stuck — always show login
+    console.warn('initAuth failed, showing login:', e);
     showAuthOverlay();
   }
 }
@@ -114,25 +140,29 @@ function togglePwd(inputId, btn) {
 async function doLogin() {
   const email    = document.getElementById('login-email')?.value.trim();
   const password = document.getElementById('login-password')?.value;
-  const errEl    = document.getElementById('login-error');
   const btn      = document.getElementById('login-btn');
 
   if (!email || !password) { showAuthError('login-error', 'Email and password required'); return; }
 
   if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> AUTHENTICATING...'; }
 
-  const res = await apiCall('/login', 'POST', { email, password });
+  let res;
+  try {
+    res = await apiCall('/login', 'POST', { email, password });
+  } catch (e) {
+    res = { success: false, error: 'Backend unreachable — please try again' };
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-sign-in-alt"></i> ENTER COMMAND CENTER'; }
+  }
 
-  if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-sign-in-alt"></i> ENTER COMMAND CENTER'; }
-
-  if (res.success) {
+  if (res && res.success) {
     currentUser = res.user;
     hideAuthError('login-error');
     showToast(`Welcome back, ${res.user.name}!`, 'success');
     hideAuthOverlay();
     onAuthSuccess();
   } else {
-    showAuthError('login-error', res.error || 'Authentication failed');
+    showAuthError('login-error', (res && res.error) || 'Authentication failed');
   }
 }
 
@@ -148,9 +178,14 @@ async function doSignup() {
 
   if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> CREATING PROFILE...'; }
 
-  const res = await apiCall('/signup', 'POST', { name, email, password, role });
-
-  if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-user-plus"></i> CREATE OPERATIVE PROFILE'; }
+  let res;
+  try {
+    res = await apiCall('/signup', 'POST', { name, email, password, role });
+  } catch (e) {
+    res = { success: false, error: 'Backend unreachable — please try again' };
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-user-plus"></i> CREATE OPERATIVE PROFILE'; }
+  }
 
   if (res.success) {
     currentUser = res.user;
@@ -214,8 +249,17 @@ function updateSidebarUser() {
 // ============================================================
 async function loadDashboardData() {
   if (!currentUser) return;
-  const res = await apiCall('/get_dashboard');
-  if (!res.success) return;
+  let res;
+  try {
+    res = await apiCall('/get_dashboard');
+  } catch (e) {
+    renderEmptyDashboard();
+    return;
+  }
+  if (!res || !res.success) {
+    renderEmptyDashboard();
+    return;
+  }
 
   if (!res.has_data) {
     renderEmptyDashboard();

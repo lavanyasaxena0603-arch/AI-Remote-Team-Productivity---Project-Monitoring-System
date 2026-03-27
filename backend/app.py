@@ -22,14 +22,25 @@ app.config['SQLALCHEMY_DATABASE_URI'] = (
     'sqlite:///' + os.path.join(os.path.dirname(__file__), 'ai_command.db')
 )
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-app.config['SESSION_COOKIE_SAMESITE'] = 'None'
+# Cookies work over plain HTTP (proxy strips HTTPS before reaching Flask)
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 app.config['SESSION_COOKIE_SECURE']   = False
+app.config['SESSION_COOKIE_HTTPONLY']  = True
 
 CORS(app, supports_credentials=True, origins=['*'])
 db.init_app(app)
 
+# Guarantee tables exist on every startup
 with app.app_context():
-    db.create_all()
+    try:
+        db.create_all()
+    except Exception as _e:
+        print(f'[WARN] db.create_all failed: {_e}')
+
+# ── Root health ────────────────────────────────────────────
+@app.route('/')
+def home():
+    return jsonify({'status': 'backend running', 'version': '2.0'})
 
 # ── Helpers ────────────────────────────────────────────────
 def ok(data=None, **kwargs):
@@ -434,6 +445,35 @@ def update_profile():
 @app.route('/api/health', methods=['GET'])
 def health():
     return ok({'status': 'online', 'version': '2.0', 'timestamp': datetime.utcnow().isoformat()})
+
+
+# ── Global error handlers — always return JSON, never crash ──
+@app.errorhandler(400)
+def bad_request(e):
+    return jsonify({'success': False, 'error': str(e)}), 400
+
+@app.errorhandler(401)
+def unauthorized(e):
+    return jsonify({'success': False, 'error': 'Not authenticated'}), 401
+
+@app.errorhandler(403)
+def forbidden(e):
+    return jsonify({'success': False, 'error': 'Forbidden'}), 403
+
+@app.errorhandler(404)
+def not_found(e):
+    return jsonify({'success': False, 'error': 'Endpoint not found'}), 404
+
+@app.errorhandler(405)
+def method_not_allowed(e):
+    return jsonify({'success': False, 'error': 'Method not allowed'}), 405
+
+@app.errorhandler(Exception)
+def handle_exception(e):
+    db.session.rollback()   # prevent broken transactions
+    import traceback
+    print('[ERROR]', traceback.format_exc())
+    return jsonify({'success': False, 'error': 'Internal server error: ' + str(e)}), 500
 
 
 if __name__ == '__main__':

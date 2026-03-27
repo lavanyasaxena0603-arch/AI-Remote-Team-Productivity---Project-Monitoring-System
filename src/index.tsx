@@ -1,9 +1,66 @@
 import { Hono } from 'hono'
 import { serveStatic } from 'hono/cloudflare-workers'
 
+const FLASK_BASE = 'http://127.0.0.1:5000'
+
 const app = new Hono()
 
 app.use('/static/*', serveStatic({ root: './public' }))
+
+// ── Flask Proxy ────────────────────────────────────────────────
+// All /flask/* requests are proxied server-side to Flask on :5000.
+// Because the browser talks to the SAME origin (port 3000), there are
+// no CORS or mixed-content issues regardless of HTTP/HTTPS.
+app.all('/flask/*', async (c) => {
+  const url    = new URL(c.req.url)
+  // Strip leading /flask prefix to get the real Flask path
+  const path   = url.pathname.slice('/flask'.length) + (url.search || '')
+  const target = FLASK_BASE + path
+
+  try {
+    const reqHeaders = new Headers()
+
+    // Forward Content-Type so Flask can parse JSON bodies
+    const ct = c.req.header('content-type')
+    if (ct) reqHeaders.set('content-type', ct)
+
+    // Forward browser cookies upstream so Flask sessions work
+    const cookie = c.req.header('cookie')
+    if (cookie) reqHeaders.set('cookie', cookie)
+
+    // Read body for non-GET methods
+    const body = ['GET', 'HEAD', 'OPTIONS'].includes(c.req.method.toUpperCase())
+      ? undefined
+      : await c.req.arrayBuffer()
+
+    const upstream = await fetch(target, {
+      method:  c.req.method,
+      headers: reqHeaders,
+      body,
+    })
+
+    // Build response headers — pass Set-Cookie back so sessions persist
+    const resHeaders = new Headers()
+    const contentType = upstream.headers.get('content-type') || 'application/json'
+    resHeaders.set('content-type', contentType)
+
+    // Forward ALL Set-Cookie headers (Flask session cookie)
+    upstream.headers.forEach((val, key) => {
+      if (key.toLowerCase() === 'set-cookie') {
+        resHeaders.append('set-cookie', val)
+      }
+    })
+
+    const data = await upstream.arrayBuffer()
+    return new Response(data, {
+      status:  upstream.status,
+      headers: resHeaders,
+    })
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e)
+    return c.json({ success: false, error: 'Flask proxy error: ' + msg }, 502)
+  }
+})
 
 app.get('/api/metrics', (c) => {
   return c.json({
