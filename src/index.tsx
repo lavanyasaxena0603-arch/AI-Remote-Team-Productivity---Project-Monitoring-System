@@ -177,9 +177,25 @@ app.get('/', (c) => {
         <span class="nav-indicator"></span>
         <span class="nav-badge">4</span>
       </a>
-      <a href="#settings" class="nav-item" data-section="settings">
-        <span class="nav-icon"><i class="fas fa-sliders-h"></i></span>
-        <span class="nav-label">Settings</span>
+      <a href="#projects" class="nav-item" data-section="projects">
+        <span class="nav-icon"><i class="fas fa-project-diagram"></i></span>
+        <span class="nav-label">Projects</span>
+        <span class="nav-indicator"></span>
+      </a>
+      <a href="#notifications" class="nav-item" data-section="notifications">
+        <span class="nav-icon"><i class="fas fa-bell"></i></span>
+        <span class="nav-label">Alerts</span>
+        <span class="nav-indicator"></span>
+        <span class="nav-badge alert-badge" id="nav-alert-badge" style="background:var(--red)">0</span>
+      </a>
+      <a href="#profile" class="nav-item" data-section="profile">
+        <span class="nav-icon"><i class="fas fa-user-circle"></i></span>
+        <span class="nav-label">Profile</span>
+        <span class="nav-indicator"></span>
+      </a>
+      <a href="#about" class="nav-item" data-section="about">
+        <span class="nav-icon"><i class="fas fa-info-circle"></i></span>
+        <span class="nav-label">About</span>
         <span class="nav-indicator"></span>
       </a>
     </nav>
@@ -189,7 +205,14 @@ app.get('/', (c) => {
         <div class="status-dot active-dot"></div>
         <span>System Online</span>
       </div>
-      <a class="nav-item logout-item" href="#">
+      <div class="sidebar-user-mini" id="sidebar-user-mini" style="display:none">
+        <div class="sui-avatar" id="sui-avatar"></div>
+        <div class="sui-info">
+          <div class="sui-name" id="sui-name">Commander</div>
+          <div class="sui-role" id="sui-role">individual</div>
+        </div>
+      </div>
+      <a class="nav-item logout-item" id="logout-btn" href="#">
         <span class="nav-icon"><i class="fas fa-sign-out-alt"></i></span>
         <span class="nav-label">Logout</span>
       </a>
@@ -223,9 +246,9 @@ app.get('/', (c) => {
           <i class="fas fa-search"></i>
           <input type="text" placeholder="Search systems..." />
         </div>
-        <button class="top-btn" title="Notifications">
+        <button class="top-btn" title="Notifications" onclick="switchSection('notifications')" id="topbar-alerts-btn">
           <i class="fas fa-bell"></i>
-          <span class="btn-badge">3</span>
+          <span class="btn-badge" id="topbar-alert-count">0</span>
         </button>
         <button class="top-btn" title="Settings">
           <i class="fas fa-cog"></i>
@@ -718,8 +741,234 @@ app.get('/', (c) => {
         </div>
       </section>
 
+      <!-- ============================== -->
+      <!-- PROJECTS SECTION -->
+      <!-- ============================== -->
+      <section class="section" id="section-projects">
+        <div class="section-header">
+          <h1 class="section-title"><i class="fas fa-project-diagram"></i> PROJECTS</h1>
+          <div class="section-subtitle">Manage projects, tasks &amp; AI monitoring</div>
+        </div>
+        <div class="glass-panel create-project-panel" id="create-project-panel">
+          <div class="panel-header">
+            <span class="panel-label">CREATE NEW PROJECT</span>
+            <button class="cpanel-toggle" id="cpanel-toggle" onclick="toggleCreateForm()">
+              <i class="fas fa-plus"></i> NEW PROJECT
+            </button>
+          </div>
+          <div id="create-project-form" style="display:none">
+            <div class="form-grid">
+              <div class="form-group">
+                <label class="form-label">PROJECT NAME *</label>
+                <input type="text" class="form-input" id="proj-name" placeholder="Enter project name..." />
+              </div>
+              <div class="form-group">
+                <label class="form-label">DEADLINE (OPTIONAL)</label>
+                <input type="date" class="form-input" id="proj-deadline" />
+              </div>
+              <div class="form-group" style="grid-column:1/-1">
+                <label class="form-label">DESCRIPTION</label>
+                <textarea class="form-input form-textarea" id="proj-desc" placeholder="Describe your project..."></textarea>
+              </div>
+            </div>
+            <div class="form-actions">
+              <button class="btn-cancel" onclick="toggleCreateForm()">CANCEL</button>
+              <button class="btn-create" onclick="createProject()">
+                <i class="fas fa-rocket"></i> LAUNCH PROJECT
+              </button>
+            </div>
+          </div>
+        </div>
+        <div id="projects-list-container" style="margin-top:20px"></div>
+        <!-- Task Modal -->
+        <div class="modal-overlay" id="task-modal" onclick="closeTaskModal()">
+          <div class="modal-panel glass-panel" onclick="event.stopPropagation()">
+            <div class="modal-header">
+              <div>
+                <div class="modal-title" id="modal-project-name">PROJECT TASKS</div>
+                <div class="modal-subtitle" id="modal-project-desc"></div>
+              </div>
+              <button class="panel-close-btn" onclick="closeTaskModal()"><i class="fas fa-times"></i></button>
+            </div>
+            <div class="modal-completion-bar">
+              <div class="modal-completion-label">
+                <span>COMPLETION</span>
+                <span id="modal-completion-pct">0%</span>
+              </div>
+              <div class="modal-bar-wrap"><div class="modal-bar" id="modal-bar"></div></div>
+            </div>
+            <div class="add-task-row">
+              <input type="text" class="form-input" id="new-task-name" placeholder="Add new task..." style="flex:1" onkeydown="if(event.key==='Enter') addTask()" />
+              <select class="form-input" id="new-task-priority" style="width:120px">
+                <option value="low">Low</option>
+                <option value="medium" selected>Medium</option>
+                <option value="high">High</option>
+              </select>
+              <button class="btn-create" style="padding:10px 20px" onclick="addTask()">
+                <i class="fas fa-plus"></i> ADD
+              </button>
+            </div>
+            <div id="modal-tasks-list" style="margin-top:16px;max-height:280px;overflow-y:auto"></div>
+            <div class="modal-chat-section">
+              <div class="panel-label" style="margin-bottom:10px"><i class="fas fa-robot" style="color:var(--blue)"></i> AI ASSISTANT</div>
+              <div class="chat-messages" id="modal-chat-messages"></div>
+              <div class="chat-input-row">
+                <input type="text" class="form-input" id="modal-chat-input" placeholder="Ask AI: what is wrong? suggestions? status?" onkeydown="if(event.key==='Enter') sendModalChat()" />
+                <button class="btn-create" style="padding:10px 18px" onclick="sendModalChat()"><i class="fas fa-paper-plane"></i></button>
+              </div>
+              <div class="chat-quick-btns">
+                <button class="quick-chat-btn" onclick="quickChat('What is wrong?')">What is wrong?</button>
+                <button class="quick-chat-btn" onclick="quickChat('Why delay?')">Why delay?</button>
+                <button class="quick-chat-btn" onclick="quickChat('Give me suggestions')">Suggestions</button>
+                <button class="quick-chat-btn" onclick="quickChat('Show status report')">Status</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============================== -->
+      <!-- NOTIFICATIONS / ALERTS -->
+      <!-- ============================== -->
+      <section class="section" id="section-notifications">
+        <div class="section-header">
+          <h1 class="section-title"><i class="fas fa-bell"></i> AI ALERT SYSTEM</h1>
+          <div class="section-subtitle">Intelligent risk monitoring — High / Medium / Low</div>
+        </div>
+        <div id="alerts-container"></div>
+      </section>
+
+      <!-- ============================== -->
+      <!-- PROFILE -->
+      <!-- ============================== -->
+      <section class="section" id="section-profile">
+        <div class="section-header">
+          <h1 class="section-title"><i class="fas fa-user-circle"></i> PROFILE</h1>
+          <div class="section-subtitle">User intelligence dossier &amp; productivity stats</div>
+        </div>
+        <div id="profile-container"></div>
+      </section>
+
+      <!-- ============================== -->
+      <!-- ABOUT -->
+      <!-- ============================== -->
+      <section class="section" id="section-about">
+        <div class="section-header">
+          <h1 class="section-title"><i class="fas fa-info-circle"></i> ABOUT</h1>
+          <div class="section-subtitle">System documentation &amp; development team</div>
+        </div>
+        <div class="about-grid">
+          <div class="glass-panel about-hero" style="grid-column:1/-1">
+            <div class="about-hero-content">
+              <div class="about-hero-visual">
+                <div class="brain-outer-ring" style="width:120px;height:120px;position:absolute"></div>
+                <div class="brain-middle-ring" style="width:90px;height:90px;position:absolute"></div>
+                <div class="brain-inner-ring" style="width:60px;height:60px;position:absolute"></div>
+                <div style="font-size:2.5rem;color:var(--blue);filter:drop-shadow(0 0 20px var(--blue));position:relative;z-index:2"><i class="fas fa-brain"></i></div>
+              </div>
+              <div class="about-hero-text">
+                <div class="about-badge">◈ SYSTEM OVERVIEW</div>
+                <h2 class="about-title">AI COMMAND CENTER</h2>
+                <p class="about-desc">A cutting-edge multi-agent AI productivity monitoring system designed for enterprise-grade project management. Four specialized AI agents work in concert to analyze, optimize, and safeguard project operations in real-time.</p>
+                <div class="about-status-row">
+                  <span class="about-status-pill dev">⚙ Currently Under Development</span>
+                  <span class="about-status-pill date"><i class="fas fa-calendar"></i> 20 January 2026</span>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="glass-panel about-section-card">
+            <div class="about-section-title"><i class="fas fa-robot" style="color:var(--blue)"></i> AI AGENTS</div>
+            <div class="about-agents-list">
+              <div class="about-agent-item" style="border-color:rgba(124,108,255,0.3)"><i class="fas fa-chess-king" style="color:#7C6CFF;font-size:1.4rem;flex-shrink:0"></i><div><div style="color:#7C6CFF;font-family:var(--font-main);font-size:0.75rem;letter-spacing:2px">PROJECT STRATEGIST</div><div style="color:var(--muted);font-size:0.82rem;margin-top:4px">Designs mission blueprints, coordinates multi-agent workflows and optimizes execution strategies.</div></div></div>
+              <div class="about-agent-item" style="border-color:rgba(0,255,156,0.3)"><i class="fas fa-eye" style="color:#00FF9C;font-size:1.4rem;flex-shrink:0"></i><div><div style="color:#00FF9C;font-family:var(--font-main);font-size:0.75rem;letter-spacing:2px">PRODUCTIVITY ANALYST</div><div style="color:var(--muted);font-size:0.82rem;margin-top:4px">Monitors data streams, processes KPIs in real-time and delivers actionable performance insights.</div></div></div>
+              <div class="about-agent-item" style="border-color:rgba(0,212,255,0.3)"><i class="fas fa-cube" style="color:#00D4FF;font-size:1.4rem;flex-shrink:0"></i><div><div style="color:#00D4FF;font-family:var(--font-main);font-size:0.75rem;letter-spacing:2px">RESOURCE OPTIMIZER</div><div style="color:var(--muted);font-size:0.82rem;margin-top:4px">Manages computational resources, balances workloads and maximizes system throughput.</div></div></div>
+              <div class="about-agent-item" style="border-color:rgba(255,76,76,0.3)"><i class="fas fa-shield-alt" style="color:#FF4C4C;font-size:1.4rem;flex-shrink:0"></i><div><div style="color:#FF4C4C;font-family:var(--font-main);font-size:0.75rem;letter-spacing:2px">RISK MANAGER</div><div style="color:var(--muted);font-size:0.82rem;margin-top:4px">Scans for threats and risks, initiates countermeasures and triggers emergency protocols.</div></div></div>
+            </div>
+          </div>
+          <div class="glass-panel about-section-card">
+            <div class="about-section-title"><i class="fas fa-code" style="color:var(--green)"></i> TECH STACK</div>
+            <div class="tech-stack-grid">
+              <div class="tech-item"><i class="fas fa-server" style="color:var(--orange)"></i><span>Flask</span><span class="tech-sub">Backend API</span></div>
+              <div class="tech-item"><i class="fas fa-database" style="color:var(--blue)"></i><span>SQLAlchemy</span><span class="tech-sub">ORM / SQLite</span></div>
+              <div class="tech-item"><i class="fas fa-bolt" style="color:var(--green)"></i><span>Hono</span><span class="tech-sub">Edge Runtime</span></div>
+              <div class="tech-item"><i class="fas fa-cloud" style="color:var(--blue)"></i><span>Cloudflare</span><span class="tech-sub">Pages</span></div>
+              <div class="tech-item"><i class="fab fa-js-square" style="color:#F7DF1E"></i><span>JavaScript</span><span class="tech-sub">ES6+ Vanilla</span></div>
+              <div class="tech-item"><i class="fas fa-chart-area" style="color:var(--purple)"></i><span>Chart.js</span><span class="tech-sub">Visualizations</span></div>
+              <div class="tech-item"><i class="fab fa-css3-alt" style="color:#2965F1"></i><span>CSS3</span><span class="tech-sub">Glassmorphism</span></div>
+              <div class="tech-item"><i class="fas fa-brain" style="color:var(--purple)"></i><span>Rule AI</span><span class="tech-sub">Chat Engine</span></div>
+            </div>
+          </div>
+          <div class="glass-panel about-section-card" style="grid-column:1/-1">
+            <div class="about-section-title"><i class="fas fa-users" style="color:var(--purple)"></i> CREATED BY</div>
+            <div class="team-cards-row">
+              <div class="team-card">
+                <div class="team-avatar"><i class="fas fa-user-astronaut" style="font-size:2rem;color:var(--purple)"></i><div class="brain-inner-ring" style="width:70px;height:70px;position:absolute;top:-5px;left:-5px"></div></div>
+                <div class="team-info">
+                  <div class="team-name">Lavanya Saxena</div>
+                  <div class="team-role">Lead AI Systems Engineer</div>
+                  <div class="team-tags"><span style="color:var(--purple)">Full-Stack</span><span style="color:var(--green)">AI/ML</span><span style="color:var(--blue)">UX Design</span></div>
+                </div>
+              </div>
+              <div class="team-card">
+                <div class="team-avatar"><i class="fas fa-user-cog" style="font-size:2rem;color:var(--blue)"></i><div class="brain-inner-ring" style="width:70px;height:70px;position:absolute;top:-5px;left:-5px;border-color:var(--blue)"></div></div>
+                <div class="team-info">
+                  <div class="team-name">Development Team</div>
+                  <div class="team-role">Backend &amp; Infrastructure</div>
+                  <div class="team-tags"><span style="color:var(--blue)">Flask</span><span style="color:var(--green)">DevOps</span><span style="color:var(--orange)">APIs</span></div>
+                </div>
+              </div>
+            </div>
+            <div class="about-footer-info">
+              <div class="about-info-item"><i class="fas fa-calendar-alt" style="color:var(--blue)"></i><span class="about-info-label">CREATED ON</span><span class="about-info-val">20 January 2026</span></div>
+              <div class="about-info-item"><i class="fas fa-code-branch" style="color:var(--green)"></i><span class="about-info-label">VERSION</span><span class="about-info-val">v2.0.0</span></div>
+              <div class="about-info-item"><i class="fas fa-tools" style="color:var(--orange)"></i><span class="about-info-label">STATUS</span><span class="about-info-val" style="color:var(--orange)">⚙ Under Development</span></div>
+              <div class="about-info-item"><i class="fas fa-globe" style="color:var(--purple)"></i><span class="about-info-label">PLATFORM</span><span class="about-info-val">Cloudflare Pages</span></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
     </div><!-- end sections-container -->
   </main>
+</div>
+
+<!-- AUTH OVERLAY -->
+<div id="auth-overlay" class="auth-overlay" style="display:none">
+  <canvas id="particle-canvas-auth"></canvas>
+  <div class="auth-container">
+    <div class="auth-panel glass-panel" id="login-panel">
+      <div class="auth-logo">
+        <div class="logo-icon" style="width:56px;height:56px;font-size:1.6rem"><i class="fas fa-brain"></i><div class="logo-pulse"></div></div>
+        <div><div class="logo-ai" style="font-size:1.4rem">AI COMMAND CENTER</div><div class="logo-cc" style="font-size:0.6rem;margin-top:2px">NEURAL INTELLIGENCE PLATFORM</div></div>
+      </div>
+      <div class="auth-title">AUTHENTICATE</div>
+      <div class="auth-subtitle">Enter your neural access credentials</div>
+      <div id="login-error" class="auth-error" style="display:none"></div>
+      <div class="form-group"><label class="form-label"><i class="fas fa-envelope"></i> EMAIL ADDRESS</label><input type="email" class="form-input" id="login-email" placeholder="operative@command.ai" autocomplete="email" /></div>
+      <div class="form-group"><label class="form-label"><i class="fas fa-lock"></i> ACCESS CODE</label><div class="input-with-eye"><input type="password" class="form-input" id="login-password" placeholder="••••••••••" autocomplete="current-password" onkeydown="if(event.key==='Enter') doLogin()" /><button class="eye-btn" onclick="togglePwd('login-password',this)"><i class="fas fa-eye"></i></button></div></div>
+      <button class="btn-auth" id="login-btn" onclick="doLogin()"><i class="fas fa-sign-in-alt"></i> ENTER COMMAND CENTER</button>
+      <div class="auth-switch">No account? <a href="#" onclick="showPanel('signup')">CREATE OPERATIVE PROFILE →</a></div>
+      <div class="auth-demo-hint"><i class="fas fa-info-circle"></i> Register with any email, min 6-char password</div>
+    </div>
+    <div class="auth-panel glass-panel" id="signup-panel" style="display:none">
+      <div class="auth-logo">
+        <div class="logo-icon" style="width:56px;height:56px;font-size:1.6rem"><i class="fas fa-brain"></i><div class="logo-pulse"></div></div>
+        <div><div class="logo-ai" style="font-size:1.4rem">AI COMMAND CENTER</div><div class="logo-cc" style="font-size:0.6rem;margin-top:2px">NEURAL INTELLIGENCE PLATFORM</div></div>
+      </div>
+      <div class="auth-title">REGISTER</div>
+      <div class="auth-subtitle">Create your operative identity</div>
+      <div id="signup-error" class="auth-error" style="display:none"></div>
+      <div class="form-grid">
+        <div class="form-group"><label class="form-label"><i class="fas fa-user"></i> OPERATIVE NAME</label><input type="text" class="form-input" id="signup-name" placeholder="Commander..." /></div>
+        <div class="form-group"><label class="form-label"><i class="fas fa-id-badge"></i> ROLE</label><select class="form-input" id="signup-role"><option value="individual">Individual</option><option value="company">Company</option></select></div>
+        <div class="form-group" style="grid-column:1/-1"><label class="form-label"><i class="fas fa-envelope"></i> EMAIL ADDRESS</label><input type="email" class="form-input" id="signup-email" placeholder="operative@command.ai" /></div>
+        <div class="form-group" style="grid-column:1/-1"><label class="form-label"><i class="fas fa-lock"></i> ACCESS CODE (min 6 chars)</label><div class="input-with-eye"><input type="password" class="form-input" id="signup-password" placeholder="••••••••••" onkeydown="if(event.key==='Enter') doSignup()" /><button class="eye-btn" onclick="togglePwd('signup-password',this)"><i class="fas fa-eye"></i></button></div></div>
+      </div>
+      <button class="btn-auth" id="signup-btn" onclick="doSignup()"><i class="fas fa-user-plus"></i> CREATE OPERATIVE PROFILE</button>
+      <div class="auth-switch">Already registered? <a href="#" onclick="showPanel('login')">← BACK TO LOGIN</a></div>
+    </div>
+  </div>
 </div>
 
 <!-- AGENT DETAIL PANEL OVERLAY -->
@@ -730,9 +979,14 @@ app.get('/', (c) => {
   </div>
 </div>
 
+<!-- TOAST NOTIFICATIONS -->
+<div id="toast-container" style="position:fixed;bottom:24px;right:24px;z-index:9000;display:flex;flex-direction:column;gap:8px;pointer-events:none"></div>
+
 <script src="/static/app.js"></script>
+<script src="/static/app2.js"></script>
 </body>
 </html>`)
+
 })
 
 export default app
