@@ -62,6 +62,9 @@ app.all('/flask/*', async (c) => {
   }
 })
 
+// Silence favicon 404
+app.get('/favicon.ico', (c) => c.body(null, 204))
+
 app.get('/api/metrics', (c) => {
   return c.json({
     productivity: 87,
