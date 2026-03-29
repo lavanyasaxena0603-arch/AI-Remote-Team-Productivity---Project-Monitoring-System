@@ -48,10 +48,14 @@ def ok(data=None, **kwargs):
     if data is not None:
         payload.update(data)
     payload.update(kwargs)
+    # Always ensure 'message' key exists so frontend never sees undefined
+    if 'message' not in payload:
+        payload['message'] = 'OK'
     return jsonify(payload), 200
 
 def err(msg, code=400):
-    return jsonify({'success': False, 'error': msg}), code
+    # Both 'error' AND 'message' keys — frontend can read either
+    return jsonify({'success': False, 'error': msg, 'message': msg}), code
 
 def current_user():
     uid = session.get('user_id')
@@ -447,33 +451,39 @@ def health():
     return ok({'status': 'online', 'version': '2.0', 'timestamp': datetime.utcnow().isoformat()})
 
 
-# ── Global error handlers — always return JSON, never crash ──
+# ── Global error handlers — always return JSON with BOTH 'error' AND 'message' keys ──
 @app.errorhandler(400)
 def bad_request(e):
-    return jsonify({'success': False, 'error': str(e)}), 400
+    msg = str(e)
+    return jsonify({'success': False, 'error': msg, 'message': msg}), 400
 
 @app.errorhandler(401)
 def unauthorized(e):
-    return jsonify({'success': False, 'error': 'Not authenticated'}), 401
+    msg = 'Not authenticated'
+    return jsonify({'success': False, 'error': msg, 'message': msg}), 401
 
 @app.errorhandler(403)
 def forbidden(e):
-    return jsonify({'success': False, 'error': 'Forbidden'}), 403
+    msg = 'Forbidden'
+    return jsonify({'success': False, 'error': msg, 'message': msg}), 403
 
 @app.errorhandler(404)
 def not_found(e):
-    return jsonify({'success': False, 'error': 'Endpoint not found'}), 404
+    msg = 'Endpoint not found'
+    return jsonify({'success': False, 'error': msg, 'message': msg}), 404
 
 @app.errorhandler(405)
 def method_not_allowed(e):
-    return jsonify({'success': False, 'error': 'Method not allowed'}), 405
+    msg = 'Method not allowed'
+    return jsonify({'success': False, 'error': msg, 'message': msg}), 405
 
 @app.errorhandler(Exception)
 def handle_exception(e):
     db.session.rollback()   # prevent broken transactions
     import traceback
     print('[ERROR]', traceback.format_exc())
-    return jsonify({'success': False, 'error': 'Internal server error: ' + str(e)}), 500
+    msg = 'Internal server error'
+    return jsonify({'success': False, 'error': msg, 'message': msg}), 500
 
 
 if __name__ == '__main__':
