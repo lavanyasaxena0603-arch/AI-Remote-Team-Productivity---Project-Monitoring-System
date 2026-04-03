@@ -57,8 +57,8 @@ app.all('/flask/*', async (c) => {
       headers: resHeaders,
     })
   } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : String(e)
-    return c.json({ success: false, error: 'Flask proxy error: ' + msg }, 502)
+    const msg = 'Flask proxy error: ' + (e instanceof Error ? e.message : String(e))
+    return c.json({ success: false, error: msg, message: msg }, 502)
   }
 })
 
