@@ -7,25 +7,67 @@
 // Route through Hono proxy so browser never calls localhost:5000 directly.
 // Hono forwards /flask/api/* → Flask :5000/api/* server-side (no CORS/mixed-content).
 const API = '/flask/api';
-let currentUser   = null;
+let currentUser    = null;
 let currentProject = null;
-let allProjects   = [];
+let allProjects    = [];
+
+// ── Guards to prevent infinite loops ──────────────────────────
+let _authInitialized  = false;   // initAuth() must run exactly once
+let _loginLoading     = false;   // prevents double-click on login
+let _signupLoading    = false;   // prevents double-click on signup
+let _authParticles    = null;    // singleton particle system for auth overlay
+let _logoutListenerAdded = false; // logout button gets one listener total
 
 // ============================================================
 // TOAST NOTIFICATIONS
 // ============================================================
+
+// Toasts must never appear while the loading screen is still visible.
+// If main-app is still hidden we queue the toast and flush once it's ready.
+const _toastQueue = [];
+let   _toastReady = false;   // set true when main-app becomes visible
+
+function _flushToastQueue() {
+  _toastReady = true;
+  _toastQueue.forEach(t => _renderToast(t.msg, t.type, t.duration));
+  _toastQueue.length = 0;
+}
+
 function showToast(msg, type = 'info', duration = 3500) {
+  const mainApp = document.getElementById('main-app');
+  const isVisible = mainApp && !mainApp.classList.contains('hidden');
+
+  if (!_toastReady && !isVisible) {
+    // Queue until loading screen is gone
+    _toastQueue.push({ msg, type, duration });
+    return;
+  }
+  _renderToast(msg, type, duration);
+}
+
+function _renderToast(msg, type, duration) {
   const container = document.getElementById('toast-container');
   if (!container) return;
 
+  // Guard: never show an empty, null, or non-string toast
+  const safeMsg = (msg && String(msg).trim()) ? String(msg).trim() : 'Action completed';
+
   const colors = { info:'#00D4FF', success:'#00FF9C', warning:'#FF8C00', error:'#FF4C4C' };
-  const icons  = { info:'fas fa-info-circle', success:'fas fa-check-circle', warning:'fas fa-exclamation-circle', error:'fas fa-exclamation-triangle' };
+  const icons  = { info:'fas fa-info-circle', success:'fas fa-check-circle',
+                   warning:'fas fa-exclamation-circle', error:'fas fa-exclamation-triangle' };
 
   const toast = document.createElement('div');
   toast.className = 'toast';
   toast.style.borderColor = colors[type] || colors.info;
-  toast.style.color = colors[type] || colors.info;
-  toast.innerHTML = `<i class="${icons[type]||icons.info}"></i><span style="color:var(--white)">${msg}</span>`;
+  toast.style.color       = colors[type] || colors.info;
+
+  const icon = document.createElement('i');
+  icon.className = icons[type] || icons.info;
+  const span = document.createElement('span');
+  span.style.color = 'var(--white)';
+  span.textContent = safeMsg;   // textContent avoids XSS and never renders "undefined"
+  toast.appendChild(icon);
+  toast.appendChild(span);
   container.appendChild(toast);
 
   setTimeout(() => {
@@ -35,81 +77,108 @@ function showToast(msg, type = 'info', duration = 3500) {
 }
 
 // ============================================================
-// API HELPERS
+// API WRAPPER — single place for fetch, timeout & error shape
 // ============================================================
 async function apiCall(endpoint, method = 'GET', body = null) {
   try {
     const opts = {
       method,
-      // 'include' works for same-origin proxy; no CORS issue
-      credentials: 'include',
+      credentials: 'include',   // always send session cookie
       headers: { 'Content-Type': 'application/json' },
     };
     if (body) opts.body = JSON.stringify(body);
 
+    // Hard 12-second timeout so the UI never hangs indefinitely
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 12000); // 12 s timeout
+    const timer = setTimeout(() => controller.abort(), 12000);
     opts.signal = controller.signal;
 
     const res = await fetch(API + endpoint, opts);
     clearTimeout(timer);
 
-    // Always try to parse JSON; fall back gracefully
+    // Always attempt JSON parse; degrade gracefully on non-JSON responses
     let data;
     try {
       data = await res.json();
     } catch (_) {
-      data = { success: false, error: `Server returned non-JSON (HTTP ${res.status})` };
+      data = {
+        success: false,
+        message: `Server returned non-JSON (HTTP ${res.status})`,
+        error:   `Server returned non-JSON (HTTP ${res.status})`,
+      };
     }
+
+    // Normalise: backend always has both 'message' and 'error' on failures,
+    // but defensively ensure 'message' is always populated from 'error' if absent.
+    if (!data.message && data.error)   data.message = data.error;
+    if (!data.error   && data.message) data.error   = data.message;
+
     return data;
+
   } catch (e) {
-    // AbortError → timeout; TypeError → network down
-    const offline = e.name === 'AbortError'
-      ? 'Request timed out — Flask may be starting up, please retry'
-      : 'Backend unreachable — check Flask is running on port 5000';
-    console.warn('apiCall error:', endpoint, e.message);
-    return { success: false, error: offline };
+    // AbortError = timeout; TypeError = network/DNS failure
+    const msg = e.name === 'AbortError'
+      ? 'Request timed out — server may be starting, please retry'
+      : 'Network error — backend unreachable';
+    console.warn('[apiCall]', endpoint, e.name, e.message);
+    return { success: false, message: msg, error: msg };
   }
 }
 
 // ============================================================
-// AUTH INIT — Show login if not authenticated
+// AUTH INIT — called ONCE after loading screen clears
 // ============================================================
 async function initAuth() {
+  // ── BUG FIX: guard prevents dual-call from interval + initMainApp hook ──
+  if (_authInitialized) return;
+  _authInitialized = true;
+
+  // Main-app is now visible — flush any toasts that were queued during loading
+  _flushToastQueue();
+
   try {
     const res = await apiCall('/me');
     if (res.success && res.user) {
       currentUser = res.user;
       onAuthSuccess();
     } else {
+      // 401 "Not authenticated" is the normal unauthenticated state — show login
       showAuthOverlay();
     }
   } catch (e) {
-    // Never leave the user stuck — always show login
-    console.warn('initAuth failed, showing login:', e);
+    // Should never reach here (apiCall never throws), but safety net:
+    console.warn('[initAuth] unexpected error, showing login:', e);
     showAuthOverlay();
   }
 }
 
+// ── Show auth overlay — only creates particle system once ──────
 function showAuthOverlay() {
   const overlay = document.getElementById('auth-overlay');
-  if (overlay) {
-    overlay.style.display = 'flex';
-    // Start auth particles
-    const authParticles = new ParticleSystem('particle-canvas-auth', {
+  if (!overlay) return;
+  overlay.style.display  = 'flex';
+  overlay.style.opacity  = '1';
+
+  // ── BUG FIX: create particle system only once to avoid stacked RAF loops ──
+  if (!_authParticles) {
+    _authParticles = new ParticleSystem('particle-canvas-auth', {
       count: 50, color: '124,108,255', speed: 0.2
     });
-    authParticles.start();
+    _authParticles.start();
   }
 }
 
 function hideAuthOverlay() {
   const overlay = document.getElementById('auth-overlay');
-  if (overlay) {
-    overlay.style.transition = 'opacity 0.5s ease';
-    overlay.style.opacity = '0';
-    setTimeout(() => { overlay.style.display = 'none'; overlay.style.opacity = '1'; }, 500);
-  }
+  if (!overlay) return;
+  overlay.style.transition = 'opacity 0.5s ease';
+  overlay.style.opacity    = '0';
+  setTimeout(() => {
+    overlay.style.display = 'none';
+    overlay.style.opacity = '1';
+    // Stop particles to free GPU resources after login
+    if (_authParticles) { _authParticles.stop(); _authParticles = null; }
+  }, 500);
 }
 
 function showPanel(type) {
@@ -129,72 +198,112 @@ function togglePwd(inputId, btn) {
   const input = document.getElementById(inputId);
   if (!input) return;
   if (input.type === 'password') {
-    input.type = 'text';
+    input.type   = 'text';
     btn.innerHTML = '<i class="fas fa-eye-slash"></i>';
   } else {
-    input.type = 'password';
+    input.type   = 'password';
     btn.innerHTML = '<i class="fas fa-eye"></i>';
   }
 }
 
+// ============================================================
+// LOGIN
+// ============================================================
 async function doLogin() {
+  // ── BUG FIX: loading guard — ignore subsequent clicks while request is in flight ──
+  if (_loginLoading) return;
+
   const email    = document.getElementById('login-email')?.value.trim();
   const password = document.getElementById('login-password')?.value;
   const btn      = document.getElementById('login-btn');
 
-  if (!email || !password) { showAuthError('login-error', 'Email and password required'); return; }
+  if (!email || !password) {
+    showAuthError('login-error', 'Email and password required');
+    return;
+  }
 
+  // Set loading state
+  _loginLoading = true;
   if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> AUTHENTICATING...'; }
 
   let res;
   try {
     res = await apiCall('/login', 'POST', { email, password });
   } catch (e) {
-    res = { success: false, error: 'Backend unreachable — please try again' };
+    // apiCall never throws — this is a safety fallback only
+    res = { success: false, message: 'Network error', error: 'Network error' };
   } finally {
+    // Always restore button regardless of outcome
+    _loginLoading = false;
     if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-sign-in-alt"></i> ENTER COMMAND CENTER'; }
   }
 
   if (res && res.success) {
-    currentUser = res.user;
+    currentUser = res.user || null;
     hideAuthError('login-error');
-    showToast(`Welcome back, ${res.user.name}!`, 'success');
+    const userName = (currentUser && currentUser.name) ? currentUser.name : 'Commander';
+    showToast(res.message || `Welcome back, ${userName}!`, 'success');
     hideAuthOverlay();
     onAuthSuccess();
   } else {
-    showAuthError('login-error', (res && res.error) || 'Authentication failed');
+    // ── BUG FIX: show error ONCE and stop — no retry loop ──
+    const errText = (res && (res.message || res.error)) || 'Authentication failed';
+    showAuthError('login-error', errText);
+    showToast(errText, 'error');
+    // Do NOT call showAuthOverlay() again — it is already visible
   }
 }
 
+// ============================================================
+// SIGNUP
+// ============================================================
 async function doSignup() {
+  // ── BUG FIX: loading guard ──
+  if (_signupLoading) return;
+
   const name     = document.getElementById('signup-name')?.value.trim();
   const email    = document.getElementById('signup-email')?.value.trim();
   const password = document.getElementById('signup-password')?.value;
   const role     = document.getElementById('signup-role')?.value;
   const btn      = document.getElementById('signup-btn');
 
-  if (!name || !email || !password) { showAuthError('signup-error', 'All fields are required'); return; }
-  if (password.length < 6) { showAuthError('signup-error', 'Password must be at least 6 characters'); return; }
+  if (!name || !email || !password) {
+    showAuthError('signup-error', 'All fields are required');
+    return;
+  }
+  if (password.length < 6) {
+    showAuthError('signup-error', 'Password must be at least 6 characters');
+    return;
+  }
 
+  // Set loading state
+  _signupLoading = true;
   if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> CREATING PROFILE...'; }
 
   let res;
   try {
     res = await apiCall('/signup', 'POST', { name, email, password, role });
   } catch (e) {
-    res = { success: false, error: 'Backend unreachable — please try again' };
+    res = { success: false, message: 'Network error', error: 'Network error' };
   } finally {
+    _signupLoading = false;
     if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-user-plus"></i> CREATE OPERATIVE PROFILE'; }
   }
 
-  if (res.success) {
-    currentUser = res.user;
+  if (res && res.success) {
+    currentUser = res.user || null;
     hideAuthError('signup-error');
-    showToast(`Profile created! Welcome, ${res.user.name}!`, 'success');
+    const userName  = (currentUser && currentUser.name) ? currentUser.name : 'Operative';
+    const toastText = res.message || `Profile created! Welcome, ${userName}!`;
+    showToast(toastText, 'success');
     hideAuthOverlay();
     onAuthSuccess();
   } else {
-    showAuthError('signup-error', res.error || 'Registration failed');
+    // ── BUG FIX: show error ONCE and stop — overlay stays open for correction ──
+    const errText = (res && (res.message || res.error)) || 'Signup failed. Try again.';
+    showAuthError('signup-error', errText);
+    showToast(errText, 'error');
+    // Do NOT re-show overlay — it is already visible
   }
 }
 
@@ -208,23 +317,31 @@ function hideAuthError(id) {
 }
 
 // ============================================================
-// POST-AUTH SETUP
+// POST-AUTH SETUP — runs after successful login OR signup
 // ============================================================
 function onAuthSuccess() {
   updateSidebarUser();
   loadDashboardData();
   loadAlerts();
-  // Update logout button
-  const logoutBtn = document.getElementById('logout-btn');
-  if (logoutBtn) {
-    logoutBtn.addEventListener('click', async (e) => {
-      e.preventDefault();
-      await apiCall('/logout', 'POST');
-      currentUser = null;
-      allProjects = [];
-      showAuthOverlay();
-      showToast('Logged out successfully', 'info');
-    });
+
+  // ── BUG FIX: attach logout listener ONCE — prevents stacked listeners
+  //    that would call showAuthOverlay() multiple times per click ──
+  if (!_logoutListenerAdded) {
+    const logoutBtn = document.getElementById('logout-btn');
+    if (logoutBtn) {
+      _logoutListenerAdded = true;
+      logoutBtn.addEventListener('click', async (e) => {
+        e.preventDefault();
+        await apiCall('/logout', 'POST');
+        currentUser  = null;
+        allProjects  = [];
+        // Reset auth guard so initAuth can run again on next page load
+        // (not needed here since page stays alive, but good hygiene)
+        _logoutListenerAdded = false;
+        showAuthOverlay();
+        showToast('Logged out successfully', 'info');
+      });
+    }
   }
 }
 
@@ -235,11 +352,10 @@ function updateSidebarUser() {
   const role = document.getElementById('sui-role');
   const ava  = document.getElementById('sui-avatar');
   if (mini) mini.style.display = 'flex';
-  if (name) name.textContent = currentUser.name;
-  if (role) role.textContent = currentUser.role;
-  if (ava)  ava.innerHTML = `<i class="fas fa-user"></i>`;
+  if (name) name.textContent   = currentUser.name;
+  if (role) role.textContent   = currentUser.role;
+  if (ava)  ava.innerHTML      = '<i class="fas fa-user"></i>';
 
-  // Update top avatar
   const topAva = document.querySelector('.top-avatar img');
   if (topAva) topAva.src = `https://api.dicebear.com/7.x/bottts/svg?seed=${encodeURIComponent(currentUser.email)}&backgroundColor=0B0F14`;
 }
@@ -249,6 +365,7 @@ function updateSidebarUser() {
 // ============================================================
 async function loadDashboardData() {
   if (!currentUser) return;
+
   let res;
   try {
     res = await apiCall('/get_dashboard');
@@ -256,8 +373,16 @@ async function loadDashboardData() {
     renderEmptyDashboard();
     return;
   }
+
+  // ── BUG FIX: on ANY failure (including 401 session expiry) show empty UI
+  //    and do NOT retry — avoids infinite call chain ──
   if (!res || !res.success) {
     renderEmptyDashboard();
+    // If session expired mid-session redirect to login without looping
+    if (res && (res.message || res.error || '').includes('authenticated')) {
+      currentUser = null;
+      showAuthOverlay();
+    }
     return;
   }
 
@@ -266,10 +391,9 @@ async function loadDashboardData() {
     return;
   }
 
-  // Update productivity ring target
+  // Update productivity ring
   window._dashTarget = res.productivity;
 
-  // Update metric cards
   const mcTasks  = document.getElementById('mc-tasks-val');
   const mcLoad   = document.getElementById('mc-load-val');
   const mcErrors = document.getElementById('mc-errors-val');
@@ -277,30 +401,30 @@ async function loadDashboardData() {
   if (mcLoad)   animateNumber('mc-load-val',  0, res.pending_tasks,   1000);
   if (mcErrors) mcErrors.textContent = res.project_count;
 
-  // Update prod sublabel
   const sublabel = document.querySelector('.prod-sublabel');
   if (sublabel) sublabel.textContent = `${res.project_count} active project${res.project_count !== 1 ? 's' : ''}`;
 
-  // Update productivity badge
   const badge = document.querySelector('.productivity-card .panel-badge');
   if (badge) {
-    if (res.productivity >= 70) { badge.className = 'panel-badge green'; badge.textContent = 'OPTIMAL'; }
-    else if (res.productivity >= 40) { badge.className = 'panel-badge'; badge.style.background = 'rgba(255,140,0,0.15)'; badge.style.color = '#FF8C00'; badge.textContent = 'PROGRESSING'; }
-    else { badge.className = 'panel-badge red'; badge.textContent = 'NEEDS ATTENTION'; }
+    if (res.productivity >= 70) {
+      badge.className = 'panel-badge green'; badge.textContent = 'OPTIMAL';
+    } else if (res.productivity >= 40) {
+      badge.className = 'panel-badge';
+      badge.style.background = 'rgba(255,140,0,0.15)'; badge.style.color = '#FF8C00';
+      badge.textContent = 'PROGRESSING';
+    } else {
+      badge.className = 'panel-badge red'; badge.textContent = 'NEEDS ATTENTION';
+    }
   }
 
-  // Re-init ring with real data
   initProductivityRingDynamic(res.productivity);
-
-  // Update agents panel with real project data
   updateAgentActivities(res);
 
-  // Update alert badge
   const alertCount = (res.alerts || []).length;
-  const navBadge    = document.getElementById('nav-alert-badge');
-  const topBadge    = document.getElementById('topbar-alert-count');
-  if (navBadge)  navBadge.textContent = alertCount;
-  if (topBadge)  topBadge.textContent = alertCount;
+  const navBadge   = document.getElementById('nav-alert-badge');
+  const topBadge   = document.getElementById('topbar-alert-count');
+  if (navBadge) navBadge.textContent = alertCount;
+  if (topBadge) topBadge.textContent = alertCount;
 
   allProjects = res.projects || [];
 }
@@ -314,13 +438,18 @@ function renderEmptyDashboard() {
   if (sublabel) sublabel.textContent = 'No Active Projects';
 
   const badge = document.querySelector('.productivity-card .panel-badge');
-  if (badge) { badge.className = 'panel-badge'; badge.style.background = 'rgba(74,96,128,0.2)'; badge.style.color = '#4a6080'; badge.textContent = 'IDLE'; }
+  if (badge) {
+    badge.className = 'panel-badge';
+    badge.style.background = 'rgba(74,96,128,0.2)';
+    badge.style.color = '#4a6080';
+    badge.textContent = 'IDLE';
+  }
 
   const mcTasks  = document.getElementById('mc-tasks-val');
   const mcLoad   = document.getElementById('mc-load-val');
   const mcErrors = document.getElementById('mc-errors-val');
-  if (mcTasks)  mcTasks.textContent = '0';
-  if (mcLoad)   mcLoad.innerHTML = '0<span style="font-size:0.5em">%</span>';
+  if (mcTasks)  mcTasks.textContent  = '0';
+  if (mcLoad)   mcLoad.innerHTML     = '0<span style="font-size:0.5em">%</span>';
   if (mcErrors) mcErrors.textContent = '0';
 }
 
@@ -342,14 +471,14 @@ function initProductivityRingDynamic(target) {
     ctx.strokeStyle = 'rgba(0,255,156,0.04)'; ctx.lineWidth = 22; ctx.stroke();
 
     for (let i = 0; i < 60; i++) {
-      const angle = (i / 60) * 2 * Math.PI - Math.PI / 2;
+      const angle   = (i / 60) * 2 * Math.PI - Math.PI / 2;
       const isMajor = i % 5 === 0;
       const r1 = r + 8, r2 = r + (isMajor ? 14 : 10);
       ctx.beginPath();
       ctx.moveTo(cx + r1 * Math.cos(angle), cy + r1 * Math.sin(angle));
       ctx.lineTo(cx + r2 * Math.cos(angle), cy + r2 * Math.sin(angle));
       ctx.strokeStyle = isMajor ? 'rgba(0,212,255,0.4)' : 'rgba(0,212,255,0.15)';
-      ctx.lineWidth = isMajor ? 1.5 : 0.8; ctx.stroke();
+      ctx.lineWidth   = isMajor ? 1.5 : 0.8; ctx.stroke();
     }
 
     if (val > 0) {
@@ -361,11 +490,12 @@ function initProductivityRingDynamic(target) {
 
       ctx.beginPath();
       ctx.arc(cx + r * Math.cos(fullAngle), cy + r * Math.sin(fullAngle), 8, 0, 2 * Math.PI);
-      ctx.fillStyle = '#00FF9C'; ctx.shadowColor = '#00FF9C'; ctx.shadowBlur = 16; ctx.fill(); ctx.shadowBlur = 0;
+      ctx.fillStyle = '#00FF9C'; ctx.shadowColor = '#00FF9C'; ctx.shadowBlur = 16;
+      ctx.fill(); ctx.shadowBlur = 0;
     }
   }
 
-  const dispEl = document.getElementById('prod-display');
+  const dispEl   = document.getElementById('prod-display');
   const interval = setInterval(() => {
     progress += 1.5;
     if (progress >= target) { progress = target; clearInterval(interval); }
@@ -379,7 +509,7 @@ function updateAgentActivities(dashData) {
     `Analyzing ${dashData.project_count} project(s)`,
     `Tracking ${dashData.total_tasks} total tasks`,
     `Optimizing ${dashData.pending_tasks} pending items`,
-    `${dashData.alerts ? dashData.alerts.length : 0} alerts active`
+    `${dashData.alerts ? dashData.alerts.length : 0} alerts active`,
   ];
   document.querySelectorAll('.agent-activity').forEach((el, i) => {
     if (activities[i]) el.textContent = activities[i];
@@ -392,7 +522,7 @@ function updateAgentActivities(dashData) {
 async function loadAlerts() {
   if (!currentUser) return;
   const res = await apiCall('/alerts');
-  if (!res.success) return;
+  if (!res || !res.success) return;   // fail silently — don't loop
 
   const alerts = res.alerts || [];
   renderAlerts(alerts, 'alerts-container');
@@ -425,12 +555,12 @@ function renderAlerts(alerts, containerId) {
   }
 
   const colorMap = {
-    high:   { bg: 'rgba(255,76,76,0.08)',   border: '#FF4C4C', label: 'HIGH RISK' },
-    medium: { bg: 'rgba(255,140,0,0.08)',   border: '#FF8C00', label: 'MEDIUM RISK' },
-    low:    { bg: 'rgba(0,255,156,0.08)',   border: '#00FF9C', label: 'LOW RISK' },
+    high:   { bg: 'rgba(255,76,76,0.08)',  border: '#FF4C4C', label: 'HIGH RISK' },
+    medium: { bg: 'rgba(255,140,0,0.08)',  border: '#FF8C00', label: 'MEDIUM RISK' },
+    low:    { bg: 'rgba(0,255,156,0.08)',  border: '#00FF9C', label: 'LOW RISK' },
   };
 
-  const html = `<div class="alerts-grid">${alerts.map((a, i) => {
+  container.innerHTML = `<div class="alerts-grid">${alerts.map((a, i) => {
     const c = colorMap[a.type] || colorMap.low;
     return `
       <div class="alert-item" style="border-left-color:${c.border};background:${c.bg};animation-delay:${i*0.08}s">
@@ -443,7 +573,6 @@ function renderAlerts(alerts, containerId) {
         <span class="alert-badge-pill" style="background:${c.bg};border:1px solid ${c.border};color:${c.border}">${c.label}</span>
       </div>`;
   }).join('')}</div>`;
-  container.innerHTML = html;
 }
 
 // ============================================================
@@ -454,7 +583,7 @@ function toggleCreateForm() {
   const btn  = document.getElementById('cpanel-toggle');
   if (!form) return;
   if (form.style.display === 'none' || form.style.display === '') {
-    form.style.display = 'block';
+    form.style.display   = 'block';
     form.style.animation = 'sectionFadeIn 0.3s ease forwards';
     if (btn) btn.innerHTML = '<i class="fas fa-times"></i> CANCEL';
   } else {
@@ -465,6 +594,7 @@ function toggleCreateForm() {
 
 async function createProject() {
   if (!currentUser) { showToast('Please login first', 'error'); return; }
+
   const name     = document.getElementById('proj-name')?.value.trim();
   const desc     = document.getElementById('proj-desc')?.value.trim();
   const deadline = document.getElementById('proj-deadline')?.value;
@@ -472,25 +602,24 @@ async function createProject() {
   if (!name) { showToast('Project name is required', 'error'); return; }
 
   const res = await apiCall('/create_project', 'POST', { name, description: desc, deadline: deadline || null });
-  if (res.success) {
-    showToast(`Project "${name}" launched!`, 'success');
-    document.getElementById('proj-name').value = '';
-    document.getElementById('proj-desc').value = '';
-    document.getElementById('proj-deadline').value = '';
-    toggleCreateForm();
-    await loadProjects();
-    await loadDashboardData();
-    await loadAlerts();
-  } else {
-    showToast(res.error || 'Failed to create project', 'error');
+  if (!res.success) {
+    showToast(res.message || res.error || 'Failed to create project', 'error');
+    return;
   }
+  showToast(`Project "${name}" launched!`, 'success');
+  document.getElementById('proj-name').value    = '';
+  document.getElementById('proj-desc').value    = '';
+  document.getElementById('proj-deadline').value = '';
+  toggleCreateForm();
+  await loadProjects();
+  await loadDashboardData();
+  await loadAlerts();
 }
 
 async function loadProjects() {
   if (!currentUser) return;
   const res = await apiCall('/projects');
-  if (!res.success) return;
-
+  if (!res.success) return;   // silent fail — no retry
   allProjects = res.projects || [];
   renderProjectCards(allProjects);
 }
@@ -517,12 +646,12 @@ function renderProjectCards(projects) {
   }
 
   const getRiskStyle = (pct) => {
-    if (pct < 30)  return { bg:'rgba(255,76,76,0.12)',  border:'#FF4C4C', label:'HIGH RISK',    fill:'#FF4C4C' };
-    if (pct < 60)  return { bg:'rgba(255,140,0,0.12)',  border:'#FF8C00', label:'MEDIUM RISK',  fill:'#FF8C00' };
-    return          { bg:'rgba(0,255,156,0.12)',  border:'#00FF9C', label:'LOW RISK',    fill:'#00FF9C' };
+    if (pct < 30) return { bg:'rgba(255,76,76,0.12)',  border:'#FF4C4C', label:'HIGH RISK',   fill:'#FF4C4C' };
+    if (pct < 60) return { bg:'rgba(255,140,0,0.12)',  border:'#FF8C00', label:'MEDIUM RISK', fill:'#FF8C00' };
+    return         { bg:'rgba(0,255,156,0.12)',  border:'#00FF9C', label:'LOW RISK',    fill:'#00FF9C' };
   };
 
-  const html = `<div class="project-cards-grid">` +
+  container.innerHTML = `<div class="project-cards-grid">` +
     projects.map(p => {
       const style = getRiskStyle(p.completion);
       return `
@@ -556,20 +685,19 @@ function renderProjectCards(projects) {
           ${p.deadline ? `<div style="margin-top:8px;font-family:var(--font-mono);font-size:0.6rem;color:var(--muted)"><i class="fas fa-calendar"></i> Deadline: ${new Date(p.deadline).toLocaleDateString()}</div>` : ''}
         </div>`;
     }).join('') + `</div>`;
-  container.innerHTML = html;
 }
 
 async function deleteProject(pid) {
   if (!confirm('Delete this project and all its tasks?')) return;
   const res = await apiCall('/projects/' + pid, 'DELETE');
-  if (res.success) {
-    showToast('Project deleted', 'warning');
-    await loadProjects();
-    await loadDashboardData();
-    await loadAlerts();
-  } else {
-    showToast(res.error || 'Delete failed', 'error');
+  if (!res.success) {
+    showToast(res.message || res.error || 'Delete failed', 'error');
+    return;
   }
+  showToast('Project deleted', 'warning');
+  await loadProjects();
+  await loadDashboardData();
+  await loadAlerts();
 }
 
 // ============================================================
@@ -590,11 +718,12 @@ async function openTaskModal(pid) {
 
   await refreshModalTasks(pid);
 
-  // Clear chat
+  // Clear chat history
   const chatMsgs = document.getElementById('modal-chat-messages');
   if (chatMsgs) chatMsgs.innerHTML = '<div class="chat-msg ai-msg"><div class="chat-bubble"><div class="chat-who" style="color:var(--blue)">◈ AI ASSISTANT</div><div class="chat-text" style="color:var(--muted)">Project loaded. Ask me anything about this project.</div></div></div>';
 
-  if (modal) modal.classList.add('open');
+  // ── BUG FIX: open modal ONCE — closing is explicit via closeTaskModal() ──
+  if (modal && !modal.classList.contains('open')) modal.classList.add('open');
   document.getElementById('new-task-name')?.focus();
 }
 
@@ -605,17 +734,17 @@ function closeTaskModal() {
 }
 
 function updateModalCompletion(pct) {
-  const bar    = document.getElementById('modal-bar');
-  const pctEl  = document.getElementById('modal-completion-pct');
-  if (bar)   bar.style.width = pct + '%';
+  const bar   = document.getElementById('modal-bar');
+  const pctEl = document.getElementById('modal-completion-pct');
+  if (bar)   bar.style.width   = pct + '%';
   if (pctEl) pctEl.textContent = pct + '%';
 }
 
 async function refreshModalTasks(pid) {
   const res = await apiCall('/tasks/' + pid);
-  if (!res.success) return;
+  if (!res.success) return;   // silent fail
   renderModalTasks(res.tasks || []);
-  // Update project in allProjects
+
   const idx = allProjects.findIndex(p => p.id === pid);
   if (idx > -1 && currentProject) {
     const pRes = await apiCall('/projects/' + pid);
@@ -641,13 +770,13 @@ function renderModalTasks(tasks) {
   }
 
   const priorityColors = { high: 'var(--red)', medium: 'var(--orange)', low: 'var(--green)' };
-
   container.innerHTML = tasks.map(t => {
     const isDone = t.status === 'completed';
     const pc = priorityColors[t.priority] || priorityColors.medium;
     return `
       <div class="task-item ${isDone ? 'done' : ''}" id="task-row-${t.id}">
-        <div class="task-checkbox" style="border-color:${isDone ? 'var(--green)' : pc};background:${isDone ? 'rgba(0,255,156,0.15)' : 'transparent'};color:var(--green)"
+        <div class="task-checkbox"
+             style="border-color:${isDone ? 'var(--green)' : pc};background:${isDone ? 'rgba(0,255,156,0.15)' : 'transparent'};color:var(--green)"
              onclick="toggleTask(${t.id}, '${isDone ? 'pending' : 'completed'}')">
           ${isDone ? '<i class="fas fa-check"></i>' : ''}
         </div>
@@ -667,34 +796,37 @@ async function addTask() {
   if (!name) { showToast('Task name required', 'warning'); return; }
 
   const res = await apiCall('/add_task', 'POST', {
-    project_id: currentProject.id, name, priority: prio
+    project_id: currentProject.id, name, priority: prio,
   });
-  if (res.success) {
-    if (nameInput) nameInput.value = '';
-    await refreshModalTasks(currentProject.id);
-    renderProjectCards(allProjects);
-    await loadDashboardData();
-    await loadAlerts();
-    showToast('Task added', 'success');
-  } else {
-    showToast(res.error || 'Failed to add task', 'error');
+  if (!res.success) {
+    showToast(res.message || res.error || 'Failed to add task', 'error');
+    return;
   }
+  if (nameInput) nameInput.value = '';
+  await refreshModalTasks(currentProject.id);
+  renderProjectCards(allProjects);
+  await loadDashboardData();
+  await loadAlerts();
+  showToast('Task added', 'success');
 }
 
 async function toggleTask(tid, newStatus) {
   const res = await apiCall('/update_task', 'POST', { task_id: tid, status: newStatus });
-  if (res.success) {
+  if (!res.success) return;   // silent fail
+  if (currentProject) {
     await refreshModalTasks(currentProject.id);
     renderProjectCards(allProjects);
     await loadDashboardData();
     await loadAlerts();
-    showToast(newStatus === 'completed' ? 'Task completed! ✓' : 'Task reopened', newStatus === 'completed' ? 'success' : 'info');
+    showToast(newStatus === 'completed' ? 'Task completed! ✓' : 'Task reopened',
+              newStatus === 'completed' ? 'success' : 'info');
   }
 }
 
 async function deleteTask(tid) {
   const res = await apiCall('/delete_task/' + tid, 'DELETE');
-  if (res.success) {
+  if (!res.success) return;   // silent fail
+  if (currentProject) {
     await refreshModalTasks(currentProject.id);
     renderProjectCards(allProjects);
     await loadDashboardData();
@@ -714,14 +846,11 @@ async function sendModalChat() {
 
   addChatMsg(message, 'user');
 
-  const res = await apiCall('/chat', 'POST', {
-    message, project_id: currentProject.id
-  });
-
+  const res = await apiCall('/chat', 'POST', { message, project_id: currentProject.id });
   if (res.success) {
-    addChatMsg(res.reply, 'ai', res.type);
+    addChatMsg(res.reply || 'No response from AI', 'ai', res.type || 'info');
   } else {
-    addChatMsg('AI unavailable — Flask server offline', 'ai', 'alert');
+    addChatMsg(res.message || 'AI unavailable — backend offline', 'ai', 'alert');
   }
 }
 
@@ -735,14 +864,14 @@ function addChatMsg(text, role, type = 'info') {
   const container = document.getElementById('modal-chat-messages');
   if (!container) return;
 
-  const div = document.createElement('div');
-  div.className = `chat-msg ${role === 'user' ? 'user-msg' : `ai-msg ${type}-msg`}`;
-  const whoColor = role === 'user' ? 'var(--blue)' : 'var(--purple)';
-  const whoLabel = role === 'user' ? 'YOU' : '◈ AI ASSISTANT';
-  div.innerHTML = `
+  const div       = document.createElement('div');
+  div.className   = `chat-msg ${role === 'user' ? 'user-msg' : `ai-msg ${type}-msg`}`;
+  const whoColor  = role === 'user' ? 'var(--blue)' : 'var(--purple)';
+  const whoLabel  = role === 'user' ? 'YOU' : '◈ AI ASSISTANT';
+  div.innerHTML   = `
     <div class="chat-bubble">
       <div class="chat-who" style="color:${whoColor}">${whoLabel}</div>
-      <div class="chat-text">${escHtml(text)}</div>
+      <div class="chat-text">${escHtml(text || '')}</div>
     </div>`;
   container.appendChild(div);
   container.scrollTop = container.scrollHeight;
@@ -754,14 +883,20 @@ function addChatMsg(text, role, type = 'info') {
 async function loadProfile() {
   if (!currentUser) return;
   const res = await apiCall('/profile');
-  if (!res.success) return;
+  if (!res.success) return;   // silent fail — no retry
 
   const { user, projects, stats } = res;
   const container = document.getElementById('profile-container');
   if (!container) return;
 
   const projectsHtml = projects.length === 0
-    ? `<div class="empty-state" style="min-height:200px"><div class="empty-state-visual" style="width:80px;height:80px"><div class="empty-ring empty-ring-1" style="border-color:rgba(0,212,255,0.2)"></div><div class="empty-state-icon" style="color:var(--muted);font-size:2rem"><i class="fas fa-project-diagram"></i></div></div><div class="empty-title" style="font-size:0.8rem">No Projects Yet</div></div>`
+    ? `<div class="empty-state" style="min-height:200px">
+         <div class="empty-state-visual" style="width:80px;height:80px">
+           <div class="empty-ring empty-ring-1" style="border-color:rgba(0,212,255,0.2)"></div>
+           <div class="empty-state-icon" style="color:var(--muted);font-size:2rem"><i class="fas fa-project-diagram"></i></div>
+         </div>
+         <div class="empty-title" style="font-size:0.8rem">No Projects Yet</div>
+       </div>`
     : projects.map(p => `
         <div class="project-card" style="margin-bottom:10px" onclick="switchSection('projects'); setTimeout(()=>openTaskModal(${p.id}),300)">
           <div style="display:flex;justify-content:space-between;align-items:center">
@@ -808,9 +943,8 @@ async function loadProfile() {
 }
 
 // ============================================================
-// SECTION SWITCHING — EXTEND ORIGINAL
+// SECTION SWITCHING — extend app.js switchSection with data loads
 // ============================================================
-// Override switchSection to load data when switching sections
 const _origSwitchSection = window.switchSection;
 window.switchSection = function(name) {
   if (_origSwitchSection) _origSwitchSection(name);
@@ -820,22 +954,22 @@ window.switchSection = function(name) {
     if (target) target.classList.add('active');
   }
 
-  // Load section-specific data
-  if (name === 'projects')      { loadProjects(); }
-  if (name === 'notifications') { loadAlerts(); }
-  if (name === 'profile')       { loadProfile(); }
-  if (name === 'dashboard')     { loadDashboardData(); }
+  // Load section-specific data only when user is authenticated
+  if (currentUser) {
+    if (name === 'projects')      loadProjects();
+    if (name === 'notifications') loadAlerts();
+    if (name === 'profile')       loadProfile();
+    if (name === 'dashboard')     loadDashboardData();
+  }
 
-  // Update breadcrumb
   const labels = {
-    dashboard: 'DASHBOARD', team: 'TEAM MONITORING', analytics: 'ANALYTICS',
-    agents: 'AI AGENTS', projects: 'PROJECTS', notifications: 'ALERTS',
-    profile: 'PROFILE', about: 'ABOUT', settings: 'SETTINGS'
+    dashboard:'DASHBOARD', team:'TEAM MONITORING', analytics:'ANALYTICS',
+    agents:'AI AGENTS', projects:'PROJECTS', notifications:'ALERTS',
+    profile:'PROFILE', about:'ABOUT', settings:'SETTINGS',
   };
   const current = document.getElementById('current-section');
   if (current) current.textContent = labels[name] || name.toUpperCase();
 
-  // Update sidebar active
   document.querySelectorAll('.nav-item').forEach(n => {
     n.classList.remove('active');
     if (n.dataset.section === name) n.classList.add('active');
@@ -847,28 +981,33 @@ window.switchSection = function(name) {
 // ============================================================
 function escHtml(str) {
   if (!str) return '';
-  return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  return String(str)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
 // ============================================================
-// STARTUP
+// STARTUP — single entry point, fires once after loading screen
 // ============================================================
 window.addEventListener('DOMContentLoaded', () => {
-  // Wait for loading screen to finish before auth
+  // Poll until main-app loses 'hidden' class (set by launchMainApp in app.js).
+  // Hard cap at 3.5 s so a stuck loader never blocks the auth check.
+  const startTime = Date.now();
   const authCheckInterval = setInterval(() => {
     const mainApp = document.getElementById('main-app');
-    if (mainApp && !mainApp.classList.contains('hidden')) {
-      clearInterval(authCheckInterval);
-      initAuth();
-    }
-  }, 200);
-});
+    const elapsed = Date.now() - startTime;
+    const ready   = mainApp && !mainApp.classList.contains('hidden');
 
-// Also hook into initMainApp completion (set after loading)
-const _origInitMainApp = window.initMainApp;
-if (_origInitMainApp) {
-  window.initMainApp = function() {
-    _origInitMainApp();
-    initAuth();
-  };
-}
+    if (ready || elapsed > 3500) {
+      clearInterval(authCheckInterval);
+      // If loader is still showing (safety cap triggered), force-hide it
+      if (!ready && mainApp) {
+        const loader = document.getElementById('loading-screen');
+        if (loader) loader.style.display = 'none';
+        mainApp.classList.remove('hidden');
+        mainApp.style.opacity = '1';
+      }
+      initAuth();   // _authInitialized guard ensures this runs only once
+    }
+  }, 150);
+});

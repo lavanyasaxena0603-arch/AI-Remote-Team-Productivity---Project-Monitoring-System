@@ -22,9 +22,12 @@ app.config['SQLALCHEMY_DATABASE_URI'] = (
     'sqlite:///' + os.path.join(os.path.dirname(__file__), 'ai_command.db')
 )
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-# Cookies work over plain HTTP (proxy strips HTTPS before reaching Flask)
-app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
-app.config['SESSION_COOKIE_SECURE']   = False
+# Flask runs on plain HTTP but the Hono proxy rewrites Set-Cookie to
+# SameSite=None;Secure so the cookie works on the HTTPS sandbox domain.
+# We keep Secure=False here so Flask itself doesn't refuse to set the cookie
+# on plain HTTP; the proxy upgrades the attribute before it hits the browser.
+app.config['SESSION_COOKIE_SAMESITE'] = 'None'
+app.config['SESSION_COOKIE_SECURE']   = False   # proxy adds Secure header
 app.config['SESSION_COOKIE_HTTPONLY']  = True
 
 CORS(app, supports_credentials=True, origins=['*'])

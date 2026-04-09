@@ -157,11 +157,12 @@ function runLoadingSequence() {
     setTimeout(() => activateAgent(idx + 1), 450);
   }
 
-  setTimeout(() => activateAgent(0), 700);
+  setTimeout(() => activateAgent(0), 300);
 
-  // Step 3 – progress bar
+  // Step 3 – progress bar (fast: ~1.2s total, hard cap at 2.5s)
+  // Each tick adds 6-18%, fires every 60ms → reaches 100% in ~600-1000ms
   const interval = setInterval(() => {
-    progressVal += Math.random() * 8 + 3;
+    progressVal += Math.random() * 12 + 6;
     if (progressVal > 100) progressVal = 100;
 
     bar.style.width = progressVal + '%';
@@ -175,31 +176,39 @@ function runLoadingSequence() {
         setTimeout(() => {
           status.textContent = statusMessages[msgIdx];
           status.style.opacity = '1';
-          status.style.transition = 'opacity 0.3s';
-        }, 150);
+          status.style.transition = 'opacity 0.2s';
+        }, 80);
       }
     }
 
     if (progressVal >= 100) {
       clearInterval(interval);
       if (status) status.textContent = 'SYSTEM READY';
-
-      setTimeout(() => {
-        ready.classList.add('show');
-        setTimeout(() => launchMainApp(loaderParticles), 900);
-      }, 300);
+      ready.classList.add('show');
+      // Short pause then launch — 400ms feels snappy
+      setTimeout(() => launchMainApp(loaderParticles), 400);
     }
-  }, 80);
+  }, 60);
+
+  // Hard safety cap: never show loader for more than 2.5s regardless
+  setTimeout(() => {
+    clearInterval(interval);
+    launchMainApp(loaderParticles);
+  }, 2500);
 }
 
 // ============================================================
 // LAUNCH MAIN APP
 // ============================================================
+let _launched = false;  // guard: launchMainApp runs exactly once
 function launchMainApp(loaderParticles) {
+  if (_launched) return;
+  _launched = true;
+
   const loader = document.getElementById('loading-screen');
   const app    = document.getElementById('main-app');
 
-  loader.style.transition = 'opacity 0.8s ease';
+  loader.style.transition = 'opacity 0.4s ease';
   loader.style.opacity = '0';
 
   setTimeout(() => {
@@ -208,12 +217,12 @@ function launchMainApp(loaderParticles) {
 
     app.classList.remove('hidden');
     app.style.opacity = '0';
-    app.style.transition = 'opacity 0.8s ease';
+    app.style.transition = 'opacity 0.4s ease';
     requestAnimationFrame(() => {
       app.style.opacity = '1';
       initMainApp();
     });
-  }, 800);
+  }, 400);
 }
 
 // ============================================================

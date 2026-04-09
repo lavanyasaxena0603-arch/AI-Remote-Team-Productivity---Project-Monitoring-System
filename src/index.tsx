@@ -44,10 +44,21 @@ app.all('/flask/*', async (c) => {
     const contentType = upstream.headers.get('content-type') || 'application/json'
     resHeaders.set('content-type', contentType)
 
-    // Forward ALL Set-Cookie headers (Flask session cookie)
+    // Forward ALL Set-Cookie headers — rewrite attributes so cookie works
+    // on the HTTPS sandbox domain (SameSite=None;Secure) AND on plain HTTP
+    // (SameSite=Lax). Remove Domain so the browser scope stays on this host.
     upstream.headers.forEach((val, key) => {
       if (key.toLowerCase() === 'set-cookie') {
-        resHeaders.append('set-cookie', val)
+        let rewritten = val
+          // Remove any Domain= directive (Flask sets it to 127.0.0.1)
+          .replace(/;\s*Domain=[^;]*/gi, '')
+          // Upgrade SameSite to None so the cookie survives the HTTPS proxy
+          .replace(/;\s*SameSite=\w+/gi, '; SameSite=None')
+        // Add Secure flag required by SameSite=None
+        if (!/;\s*Secure/i.test(rewritten)) {
+          rewritten += '; Secure'
+        }
+        resHeaders.append('set-cookie', rewritten)
       }
     })
 
