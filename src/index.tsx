@@ -1,7 +1,7 @@
 import { Hono } from 'hono'
 import { serveStatic } from 'hono/cloudflare-workers'
 
-const FLASK_BASE = 'http://127.0.0.1:5000'
+const FLASK_BASE = 'http://127.0.0.1:5001'
 
 const app = new Hono()
 

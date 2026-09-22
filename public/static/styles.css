@@ -927,7 +927,6 @@ canvas { display: block; }
   background: rgba(5,10,15,0.85);
   backdrop-filter: blur(8px);
   display: none; align-items: center; justify-content: center;
-  animation: overlayIn 0.3s ease forwards;
 }
 .agent-panel-overlay.open { display: flex; }
 @keyframes overlayIn { from{opacity:0}to{opacity:1} }
